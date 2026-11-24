@@ -106,6 +106,33 @@
         return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
     }
 
+    function syncRemainTypography(badge, timeEl) {
+        if (!badge || !timeEl) return;
+        const labelEl = timeEl.querySelector('.bpx-player-ctrl-time-current')
+            || timeEl.querySelector('.bpx-player-ctrl-time-label')
+            || timeEl;
+        const csLabel = getComputedStyle(labelEl);
+        const csTime = getComputedStyle(timeEl);
+        if (csLabel.fontSize && badge.style.fontSize !== csLabel.fontSize) {
+            badge.style.fontSize = csLabel.fontSize;
+        }
+        if (csLabel.fontFamily && badge.style.fontFamily !== csLabel.fontFamily) {
+            badge.style.fontFamily = csLabel.fontFamily;
+        }
+        if (csTime.height && csTime.height !== 'auto' && badge.style.height !== csTime.height) {
+            badge.style.height = csTime.height;
+        }
+        badge.style.transform = '';
+        const refRect = labelEl.getBoundingClientRect();
+        const myRect = badge.getBoundingClientRect();
+        if (refRect.height > 0 && myRect.height > 0) {
+            const dy = (refRect.top + refRect.bottom) / 2 - (myRect.top + myRect.bottom) / 2;
+            if (Math.abs(dy) > 0.4) {
+                badge.style.transform = `translateY(${dy.toFixed(1)}px)`;
+            }
+        }
+    }
+
     // 折算并更新真实剩余观看时间
     function updateRemainingTime(video) {
         const targetVideo = video || getVideoElement();
@@ -119,6 +146,7 @@
             badge.title = '按当前倍速折算的实际剩余观看时间';
             timeEl.insertAdjacentElement('afterend', badge);
         }
+        syncRemainTypography(badge, timeEl);
 
         if (
             !targetVideo ||
@@ -267,10 +295,14 @@
                 background: rgba(0, 0, 0, 0.45);
             }
             #${REMAIN_EL_ID} {
+                display: inline-flex;
+                align-items: center;
                 margin-left: 8px;
+                margin-right: 4px;
                 font-size: 12px;
-                line-height: 22px;
-                color: rgba(255, 255, 255, 0.8);
+                line-height: 1;
+                vertical-align: middle;
+                color: hsla(0, 0%, 100%, 0.78);
                 white-space: nowrap;
                 font-variant-numeric: tabular-nums;
                 user-select: none;
@@ -427,6 +459,12 @@
     hookHistoryMethod('replaceState');
     window.addEventListener('popstate', handleVideoChangeIfNeeded);
     window.addEventListener('hashchange', handleVideoChangeIfNeeded);
+    document.addEventListener('fullscreenchange', () => {
+        requestAnimationFrame(() => updateRemainingTime());
+        setTimeout(() => updateRemainingTime(), 120);
+        setTimeout(() => updateRemainingTime(), 350);
+    });
+    window.addEventListener('resize', () => updateRemainingTime(), { passive: true });
 
     let initScheduled = false;
     const scheduleInit = () => {
