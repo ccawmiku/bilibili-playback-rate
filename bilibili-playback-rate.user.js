@@ -75,8 +75,9 @@
 
     // 识别当前视频唯一标识（忽略 spm_id_from、t 等无关参数）
     function getVideoKey() {
-        const path = location.pathname.replace(/\/+$/, '');
-        const params = new URLSearchParams(location.search);
+        const loc = typeof location !== 'undefined' ? location : { pathname: '', search: '' };
+        const path = (loc.pathname || '').replace(/\/+$/, '');
+        const params = new URLSearchParams(loc.search || '');
         const parts = [path];
         for (const k of ['p', 'bvid', 'aid', 'oid']) {
             const v = params.get(k);
@@ -158,7 +159,9 @@
             return;
         }
 
-        const rate = targetVideo.playbackRate > 0 ? targetVideo.playbackRate : currentRate;
+        const rate = Number.isFinite(targetVideo.playbackRate) && targetVideo.playbackRate > 0
+            ? targetVideo.playbackRate
+            : currentRate;
         const rawRemain = Math.max(0, targetVideo.duration - targetVideo.currentTime);
         const realRemain = rawRemain / rate;
         const text = `实际剩 ${formatDuration(realRemain)}`;
@@ -170,7 +173,7 @@
     function updateRateText(rate) {
         const rateElement = $('.bpx-player-ctrl-playbackrate-result');
         if (rateElement) {
-            rateElement.innerText = rate === 1 ? '倍速' : `${rate}x`;
+            rateElement.textContent = rate === 1 ? '倍速' : `${rate}x`;
         }
     }
 
@@ -348,7 +351,7 @@
     function buildCustomMenuItem(menuNode) {
         const customItem = document.createElement('li');
         customItem.className = 'bpx-player-ctrl-playbackrate-menu-item lgldlk-custom-item';
-        customItem.innerText = '自定义';
+        customItem.textContent = '自定义';
 
         customItem.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -363,14 +366,32 @@
             input.className = 'lgldlk-custom-input';
             input.title = `输入 ${MIN_RATE} ~ ${MAX_RATE} 后按回车`;
 
+            let settled = false;
+            const onBlur = () => commit();
+
+            const restoreLabel = () => {
+                input.removeEventListener('blur', onBlur);
+                customItem.textContent = '自定义';
+            };
+
             const commit = () => {
-                const val = parseFloat(input.value);
-                customItem.innerText = '自定义';
+                if (settled) return;
+                settled = true;
+                const raw = input.value.trim();
+                const val = raw === '' ? Number.NaN : Number(raw);
+                restoreLabel();
                 if (isValidRate(val)) {
                     setRate(getVideoElement(), val);
                 } else {
                     updateMenuActive(currentRate);
                 }
+            };
+
+            const cancel = () => {
+                if (settled) return;
+                settled = true;
+                restoreLabel();
+                updateMenuActive(currentRate);
             };
 
             input.addEventListener('click', (ev) => ev.stopPropagation());
@@ -379,13 +400,12 @@
                 if (ev.key === 'Enter') {
                     commit();
                 } else if (ev.key === 'Escape') {
-                    customItem.innerText = '自定义';
-                    updateMenuActive(currentRate);
+                    cancel();
                 }
             });
-            input.addEventListener('blur', commit);
+            input.addEventListener('blur', onBlur);
 
-            customItem.innerText = '';
+            customItem.textContent = '';
             customItem.appendChild(input);
             input.focus();
             input.select();
@@ -408,7 +428,7 @@
             const rateItem = document.createElement('li');
             rateItem.className = 'bpx-player-ctrl-playbackrate-menu-item';
             rateItem.setAttribute('data-rate-val', String(rate));
-            rateItem.innerText = `${rate}x`;
+            rateItem.textContent = `${rate}x`;
             rateItem.addEventListener('click', (e) => {
                 e.stopPropagation();
                 setRate(getVideoElement(), rate);
@@ -435,36 +455,27 @@
             updateRemainingTime(e.target);
         }
     };
-    document.addEventListener('playing', onMediaActive, true);
-    document.addEventListener('loadedmetadata', onMediaActive, true);
 
     const onMediaProgress = (e) => {
         if (!isMediaTarget(e.target)) return;
         updateRemainingTime(e.target);
     };
-    document.addEventListener('timeupdate', onMediaProgress, true);
-    document.addEventListener('seeked', onMediaProgress, true);
-    document.addEventListener('ratechange', onMediaProgress, true);
 
     const hookHistoryMethod = (methodName) => {
         const orig = history[methodName];
-        if (typeof orig !== 'function') return;
-        history[methodName] = function (...args) {
+        if (typeof orig !== 'function') return () => {};
+        const wrapped = function (...args) {
             const ret = orig.apply(this, args);
             handleVideoChangeIfNeeded();
             return ret;
         };
+        history[methodName] = wrapped;
+        return () => {
+            if (history[methodName] === wrapped) {
+                history[methodName] = orig;
+            }
+        };
     };
-    hookHistoryMethod('pushState');
-    hookHistoryMethod('replaceState');
-    window.addEventListener('popstate', handleVideoChangeIfNeeded);
-    window.addEventListener('hashchange', handleVideoChangeIfNeeded);
-    document.addEventListener('fullscreenchange', () => {
-        requestAnimationFrame(() => updateRemainingTime());
-        setTimeout(() => updateRemainingTime(), 120);
-        setTimeout(() => updateRemainingTime(), 350);
-    });
-    window.addEventListener('resize', () => updateRemainingTime(), { passive: true });
 
     let initScheduled = false;
     const scheduleInit = () => {
@@ -472,33 +483,153 @@
         initScheduled = true;
         requestAnimationFrame(() => {
             initScheduled = false;
+            if (typeof document === 'undefined') return;
             handleVideoChangeIfNeeded();
             initRateMenu();
             updateRemainingTime();
         });
     };
 
-    const observer = new MutationObserver(() => {
-        const menuNode = $('ul.bpx-player-ctrl-playbackrate-menu');
-        const timeEl = $('.bpx-player-ctrl-time');
-        const needMenu = menuNode && menuNode.getAttribute(MENU_MARK_ATTR) !== 'true';
-        const needRemain = timeEl && !document.getElementById(REMAIN_EL_ID);
-        if (needMenu || needRemain) {
-            scheduleInit();
-        }
-    });
+    let activeUnmount = null;
 
-    const start = () => {
-        initRateMenu();
-        updateRemainingTime();
-        if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true });
+    function mountLifecycle() {
+        if (typeof activeUnmount === 'function') {
+            activeUnmount();
         }
-    };
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', start, { once: true });
-    } else {
-        start();
+        let disposed = false;
+        const fullscreenTimers = new Set();
+
+        const onFullscreenChange = () => {
+            requestAnimationFrame(() => {
+                if (!disposed) updateRemainingTime();
+            });
+            for (const delay of [120, 350]) {
+                const timerId = setTimeout(() => {
+                    fullscreenTimers.delete(timerId);
+                    if (!disposed) updateRemainingTime();
+                }, delay);
+                fullscreenTimers.add(timerId);
+            }
+        };
+        const onResize = () => updateRemainingTime();
+
+        document.addEventListener('playing', onMediaActive, true);
+        document.addEventListener('loadedmetadata', onMediaActive, true);
+        document.addEventListener('timeupdate', onMediaProgress, true);
+        document.addEventListener('seeked', onMediaProgress, true);
+        document.addEventListener('ratechange', onMediaProgress, true);
+
+        const unhookPushState = hookHistoryMethod('pushState');
+        const unhookReplaceState = hookHistoryMethod('replaceState');
+        window.addEventListener('popstate', handleVideoChangeIfNeeded);
+        window.addEventListener('hashchange', handleVideoChangeIfNeeded);
+        document.addEventListener('fullscreenchange', onFullscreenChange);
+        window.addEventListener('resize', onResize, { passive: true });
+
+        const observer = new MutationObserver(() => {
+            if (disposed || typeof document === 'undefined') return;
+            const menuNode = $('ul.bpx-player-ctrl-playbackrate-menu');
+            const timeEl = $('.bpx-player-ctrl-time');
+            const needMenu = menuNode && menuNode.getAttribute(MENU_MARK_ATTR) !== 'true';
+            const needRemain = timeEl && !document.getElementById(REMAIN_EL_ID);
+            if (needMenu || needRemain) {
+                scheduleInit();
+            }
+        });
+
+        const start = () => {
+            if (disposed) return;
+            initRateMenu();
+            updateRemainingTime();
+            if (document.body) {
+                observer.observe(document.body, { childList: true, subtree: true });
+            }
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+        } else {
+            start();
+        }
+
+        const unmount = () => {
+            if (disposed) return;
+            disposed = true;
+            observer.disconnect();
+            for (const timerId of fullscreenTimers) {
+                clearTimeout(timerId);
+            }
+            fullscreenTimers.clear();
+            document.removeEventListener('playing', onMediaActive, true);
+            document.removeEventListener('loadedmetadata', onMediaActive, true);
+            document.removeEventListener('timeupdate', onMediaProgress, true);
+            document.removeEventListener('seeked', onMediaProgress, true);
+            document.removeEventListener('ratechange', onMediaProgress, true);
+            unhookPushState();
+            unhookReplaceState();
+            window.removeEventListener('popstate', handleVideoChangeIfNeeded);
+            window.removeEventListener('hashchange', handleVideoChangeIfNeeded);
+            document.removeEventListener('fullscreenchange', onFullscreenChange);
+            window.removeEventListener('resize', onResize, { passive: true });
+            document.removeEventListener('DOMContentLoaded', start);
+            if (activeUnmount === unmount) {
+                activeUnmount = null;
+            }
+        };
+
+        activeUnmount = unmount;
+        return unmount;
+    }
+
+    function unmountLifecycle() {
+        if (typeof activeUnmount === 'function') {
+            activeUnmount();
+        }
+    }
+
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        mountLifecycle();
+    }
+
+    // 仅在 Node.js 测试环境中导出纯函数与模块接口，保持浏览器油猴零构建运行
+    if (
+        typeof module !== 'undefined' &&
+        module.exports &&
+        typeof process !== 'undefined' &&
+        process.versions &&
+        process.versions.node
+    ) {
+        module.exports = {
+            RATE_STORAGE_KEY,
+            PERSIST_STORAGE_KEY,
+            MENU_MARK_ATTR,
+            REMAIN_EL_ID,
+            MIN_RATE,
+            MAX_RATE,
+            RATE_LIST,
+            isValidRate,
+            getPersistEnabled,
+            savePersistEnabled,
+            getSavedRate,
+            saveRate,
+            getVideoKey,
+            getVideoElement,
+            formatDuration,
+            syncRemainTypography,
+            updateRemainingTime,
+            updateRateText,
+            updateMenuActive,
+            applyRateToVideo,
+            setRate,
+            handleVideoChangeIfNeeded,
+            injectStyle,
+            initRateMenu,
+            isMediaTarget,
+            scheduleInit,
+            mountLifecycle,
+            unmountLifecycle,
+            getState: () => ({ persistEnabled, activeVideoKey, currentRate })
+        };
     }
 })();
