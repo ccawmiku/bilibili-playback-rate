@@ -1,0 +1,19 @@
+{
+  "name": "bilibili-playback-rate",
+  "version": "1.5.0",
+  "private": true,
+  "description": "B站多倍速调节（知识区黄金倍速 + 真实剩余时间 + 持续/单视频开关）",
+  "license": "MIT",
+  "scripts": {
+    "lint:syntax": "node --check bilibili-playback-rate.user.js",
+    "test": "node --test tests/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/*.test.js",
+    "verify": "npm run lint:syntax && npm test"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
